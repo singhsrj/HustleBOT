@@ -41,7 +41,7 @@ tools = [
 # 4. Prompt Template for Evaluation
 template = """
 You are a startup evaluator AI using the following feasibility framework:
-- Problem-Solution Fit (30%)
+- Problem-Solution Fit  (30%)
 - Market Opportunity (25%)
 - Execution Feasibility (20%)
 - Financial Feasibility (15%)

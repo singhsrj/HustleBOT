@@ -1,188 +1,105 @@
-from langchain_groq import ChatGroq
-from langchain.agents import Tool
-from langchain.tools import tool
-from langchain.chains.llm_math.base import LLMMathChain
-from langchain import SerpAPIWrapper
 from langgraph.graph import StateGraph, END
-from dotenv import load_dotenv
-import os
+from typing import Dict, TypedDict, Optional
+from ollama import Client
+from serpapi import GoogleSearch
+from tavily import TavilyClient
+import langgraph
 
-# Load environment variables
-load_dotenv()
 
-# API Keys
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-SERP_API_KEY = os.getenv("SERP_API_KEY")
+tavily_client_api= "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"
+serp_client_api = "843c455cc99584a69ecb59a5fdb67c5e7845f4c89a484b2e192b5966a8f73e00"
 
-# LLM Initialization
-llm = ChatGroq(model="Gemma2-9b-It", groq_api_key=GROQ_API_KEY)
 
-# Tools
-search = SerpAPIWrapper(serpapi_api_key="a36c527309fe1bc741f80480d37b53b45277109d9b9bf91c1c00b57c12b6573c")
-llm_math_chain = LLMMathChain.from_llm(llm=llm, verbose=False)
+# State to store conversation data
+class ChatState(TypedDict):
+    responses: Dict[str, str]
+    current_question: int
+    final_analysis: Optional[str]
 
-tools = [
-    Tool(name="Search", func=search.run, description="Web search tool"),
-    Tool(name="Calculator", func=llm_math_chain.run, description="Math solving tool"),
+# Initialize Ollama client
+ollama_client = Client(host='http://localhost:11434')  # Default Ollama port
+
+# Initialize tools
+serp_client = GoogleSearch({"api_key": serp_client_api})
+tavily_client = TavilyClient(api_key=tavily_client_api)
+
+# Questions list
+QUESTIONS = [
+    "What specific problem are you solving, and why is it actually urgent right now?",
+    "Have you validated this with real users? (e.g., interest, usage, willingness to pay)",
+    "Who are your target customers, and how big is the market you're going after? Specify the size of competitors if any.",
+    "What makes your solution unique compared to existing alternatives?",
+    "Who's on your team, and what makes you the right people to build this?",
+    "Do you have a clear plan or prototype for building and launching this product?",
+    "Do you know how much it will cost to build and launch your MVP?",
+    "How are you planning to fund it — personal funds, investors, grants?",
+    "How will you make money (financial model), and can this grow into a large, repeatable business?",
+    "Are there any legal, ethical, or regulatory risks you’re aware of?",
+    "Bonus (optional): How do you plan to acquire your first 100 users/customers?"
 ]
 
-# Shared templates
-def generate_template(section: str, idea: str) -> str:
-    templates = {
-        "problem_solution_fit": f""" Given the startup idea description below, evaluate its Problem-Solution Fit:
+# Function to call Ollama
+def call_llm(prompt: str) -> str:
+    response = ollama_client.chat(model="llama3", messages=[{"role": "user", "content": prompt}])
+    return response["message"]["content"]
 
-Startup Idea: {idea}
+# Tool functions
+def search_web(query: str) -> str:
+    params = {"q": query, "num": 5}
+    results = serp_client.get_json(params)
+    return "\n".join([r["snippet"] for r in results.get("organic_results", [])])
 
-Answer the following:
+def tavily_search(query: str) -> str:
+    response = tavily_client.search(query, max_results=5)
+    return "\n".join([r["content"] for r in response["results"]])
 
-Is this solving a clearly defined and urgent problem?
-How likely are people to pay for this solution? Provide reasoning.
-Is the problem widespread and relevant to a large or niche group?
+# Node to ask questions
+def ask_question(state: ChatState) -> ChatState:
+    if state["current_question"] >= len(QUESTIONS):
+        return {"final_analysis": analyze_responses(state["responses"]), "current_question": END}
+    
+    question = QUESTIONS[state["current_question"]]
+    prompt = f"Ask the user: {question}"
+    response = call_llm(prompt)
+    print(response)  # This will be sent to the user via FastAPI
+    return state
 
-Score the following:
-Problem clarity and relevance (out of 8%)
-Urgency of the problem (out of 10%)
-User willingness to pay / validation (out of 12%)
+# Node to process user response
+def process_response(state: ChatState, user_input: str) -> ChatState:
+    q_idx = state["current_question"]
+    state["responses"][f"Q{q_idx + 1}"] = user_input
+    
+    # Use tools for specific questions
+    if q_idx == 2:  # Market size and competitors
+        market_info = tavily_search(f"market size and competitors for {user_input}")
+        state["responses"]["Q3_enriched"] = market_info
+    elif q_idx == 3:  # Uniqueness
+        competitors = search_web(f"alternatives to {user_input}")
+        state["responses"]["Q4_enriched"] = competitors
+    
+    state["current_question"] += 1
+    return state
 
-Total score (out of 30%): ___% 
-Just return the score , nothing more, nothing less
-""",
-        "market_opportunity": f""" Evaluate the Market Opportunity for the following startup idea:
-
-Startup Idea: {idea}
-
-Questions to address:
-What is the estimated market size? Is it growing or stagnant?
-Who are the major competitors and how saturated is the space?
-How unique, innovative, or differentiated is this idea?
-
-Score the following:
-Market size & growth potential (out of 10%)
-Competitive landscape & positioning (out of 8%)
-Innovation/Uniqueness (out of 7%)
-
-Total score (out of 25%): ___% Just return the score , nothing more, nothing less
-""",
-        "execution_feasibility": f""" Analyze Execution Feasibility of the startup idea:
-
-Startup Idea: {idea}
-
-Address the following:
-Does the team or founder have the skills to build this?
-Does the founder have domain experience or passion for this?
-Are there major tech, operational, or logistic hurdles?
-
-Score the following:
-Team skills and complementarity (out of 8%)
-Founder’s domain knowledge and passion (out of 7%)
-Tech and operational feasibility (out of 5%)
-
-Total score (out of 20%): ___% .Just return the score , nothing more, nothing less
-""",
-        "financial_feasibility": f""" Assess the Financial Feasibility of this startup concept:
-
-Startup Idea: {idea}
-
-Evaluate the following:
-Are the expected startup costs reasonable and clearly estimated?
-Does the team have initial capital or access to it?
-Is the idea structured in a way that’s attractive to investors?
-Are potential funding sources identified (e.g., grants, VCs)?
-
-Score:
-Startup cost estimation (out of 6%)
-Personal/team capital available (out of 4%)
-Investor readiness (out of 3%)
-Awareness of funding options (out of 2%)
-
-Total score (out of 15%): ___%.Just return the score , nothing more, nothing less
-"""
+# Analysis function
+def analyze_responses(responses: Dict[str, str]) -> str:
+    # Simple scoring logic (customize as needed)
+    scores = {
+        "Problem-Solution Fit": 0.3 if len(responses.get("Q1", "")) > 20 and len(responses.get("Q2", "")) > 20 else 0,
+        "Market Opportunity": 0.25 if (len(responses.get("Q3", "")) > 20 and len(responses.get("Q4", "")) > 20) else 0,
+        "Execution Feasibility": 0.2 if (len(responses.get("Q5", "")) > 20 and len(responses.get("Q6", "")) > 20)else 0,
+        "Financial Feasibility": 0.15 if (len(responses.get("Q7", "")) > 20 and len(responses.get("Q8", "")) > 20)else 0,
+        "Scalability & Sustainability": 0.1 if (len(responses.get("Q9", "")) > 20 and len(responses.get("Q10", "")) > 20)else 0
     }
-    return templates[section]
+    total_score = sum(scores.values()) * 100
+    return f"Analysis:\n{scores}\nTotal Score: {total_score:.2f}%"
 
-# State Definition
-class IdeaState(dict):
-    idea_description: str
-    problem_score: int
-    market_score: int
-    execution_score: int
-    financial_score: int
-    total_score: int
-    decision: str
+# Build the graph
+graph = StateGraph(ChatState)
+graph.add_node("ask", ask_question)
+graph.add_node("process", process_response)
+graph.add_edge("ask", "process")
+graph.add_conditional_edges("process", lambda state: "ask" if state["current_question"] != END else END)
+graph.set_entry_point("ask")
 
-# Node Functions
-def evaluate_problem_solution_fit(state: IdeaState):
-    prompt = generate_template("problem_solution_fit", state["idea_description"])
-    # result = int(llm.invoke(prompt).strip('%\n '))
-    result = int(llm.invoke(prompt).content)
-    state["problem_score"] = result
-    return state
-
-def evaluate_market_opportunity(state: IdeaState):
-    prompt = generate_template("market_opportunity", state["idea_description"])
-    # result = int(llm.invoke(prompt).strip('%\n '))
-    result = int(llm.invoke(prompt).content)
-
-    state["market_score"] = result
-    return state
-
-def evaluate_execution(state: IdeaState):
-    prompt = generate_template("execution_feasibility", state["idea_description"])
-    # result = int(llm.invoke(prompt).strip('%\n '))
-    result = int(llm.invoke(prompt).content)
-
-    state["execution_score"] = result
-    return state
-
-def evaluate_financial(state: IdeaState):
-    prompt = generate_template("financial_feasibility", state["idea_description"])
-    # result = int(llm.invoke(prompt).strip('%\n '))
-    result = int(llm.invoke(prompt).content)
-
-    state["financial_score"] = result
-    return state
-
-def final_decision(state: IdeaState):
-    total = (
-        state["problem_score"]
-        + state["market_score"]
-        + state["execution_score"]
-        + state["financial_score"]
-    )
-    state["total_score"] = total
-    state["decision"] = "Feasible ✅" if total >= 60 else "Not Feasible ❌"
-    return state
-
-# Define the Graph
-graph = StateGraph(IdeaState)
-graph.add_node("Problem-Solution Fit", evaluate_problem_solution_fit)
-graph.add_node("Market Opportunity", evaluate_market_opportunity)
-graph.add_node("Execution", evaluate_execution)
-graph.add_node("Financial", evaluate_financial)
-graph.add_node("Final Score", final_decision)
-
-# Graph flow
-graph.set_entry_point("Problem-Solution Fit")
-graph.add_edge("Problem-Solution Fit", "Market Opportunity")
-graph.add_edge("Market Opportunity", "Execution")
-graph.add_edge("Execution", "Financial")
-graph.add_edge("Financial", "Final Score")
-graph.add_edge("Final Score", END)
-
-# Compile Graph
+# Compile the graph
 app = graph.compile()
-
-# Run the agentic graph
-idea_input = input("🧠 Enter your startup idea: ")
-if idea_input.strip().lower() in ['exit', 'quit']:
-    print("👋 Goodbye!")
-else:
-    state = {"idea_description": idea_input}
-    result = app.invoke(state)
-    print(f"\n🏁 Final Evaluation:")
-    print(f"🧩 Problem-Solution Fit: {result['problem_score']}%")
-    print(f"📈 Market Opportunity: {result['market_score']}%")
-    print(f"🛠️ Execution Feasibility: {result['execution_score']}%")
-    print(f"💰 Financial Feasibility: {result['financial_score']}%")
-    print(f"📊 Total Score: {result['total_score']}%")
-    print(f"✅ Decision: {result['decision']}")

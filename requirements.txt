@@ -1,3 +1,9 @@
 diffusers
 torch
 google-search-results
+langgraph 
+ollama 
+fastapi 
+uvicorn 
+serpapi 
+tavily-python
