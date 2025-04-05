@@ -5,7 +5,6 @@ from serpapi import GoogleSearch
 from tavily import TavilyClient
 import langgraph
 
-
 tavily_client_api= "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"
 serp_client_api = "843c455cc99584a69ecb59a5fdb67c5e7845f4c89a484b2e192b5966a8f73e00"
 

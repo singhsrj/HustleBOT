@@ -1,0 +1,6 @@
+digraph {
+	ask
+	process
+	__start__ -> ask
+	ask -> process
+}

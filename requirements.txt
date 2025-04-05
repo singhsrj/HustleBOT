@@ -7,3 +7,4 @@ fastapi
 uvicorn 
 serpapi 
 tavily-python
+graphviz
