@@ -1,28 +1,32 @@
-# streamlit_app.py
-
-import streamlit as st
-import langgraph
-from langgraph.graph import StateGraph, END
+import gradio as gr
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from typing import Dict, TypedDict, Optional
 from ollama import Client
 from serpapi import GoogleSearch
 from tavily import TavilyClient
-import langgraph
+import uvicorn
 
-# Setup API keys and clients
-tavily_client = TavilyClient(api_key="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")
-serp_client = GoogleSearch({"api_key": "843c455cc99584a69ecb59a5fdb67c5e7845f4c89a484b2e192b5966a8f73e00"})
-ollama_client = Client(host='http://localhost:11434')  # Ollama running locally
+# === Replace langgraph logic manually (not installed on PyPI) ===
 
-# LangGraph state type
 class ChatState(TypedDict):
     responses: Dict[str, str]
     current_question: int
     final_analysis: Optional[str]
 
+# === Init clients ===
+
+tavily_client_api = "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"
+serp_client_api = "843c455cc99584a69ecb59a5fdb67c5e7845f4c89a484b2e192b5966a8f73e00"
+
+ollama_client = Client(host='http://localhost:11434')
+serp_client = GoogleSearch({"api_key": serp_client_api})
+tavily_client = TavilyClient(api_key=tavily_client_api)
+
 QUESTIONS = [
     "What specific problem are you solving, and why is it actually urgent right now?",
-    "Have you validated this with real users? (e.g., interest, usage, willingness to pay)",
+    "Have you validated this with real users? (e.g., interest, usage, willingness to pay)?",
     "Who are your target customers, and how big is the market you're going after? Specify the size of competitors if any.",
     "What makes your solution unique compared to existing alternatives?",
     "Who's on your team, and what makes you the right people to build this?",
@@ -41,35 +45,19 @@ def call_llm(prompt: str) -> str:
     return response["message"]["content"]
 
 def search_web(query: str) -> str:
-    params = {"q": query, "num": 5}
-    results = serp_client.get_json(params)
+    params = {
+        "engine": "google",
+        "q": query,
+        "api_key": serp_client_api,
+        "num": 5
+    }
+    search = GoogleSearch(params)
+    results = search.get_dict()
     return "\n".join([r["snippet"] for r in results.get("organic_results", [])])
 
 def tavily_search(query: str) -> str:
-    response = tavily_client.search(query, max_results=5)
+    response = tavily_client.search(query, max_results=15)
     return "\n".join([r["content"] for r in response["results"]])
-
-def ask_question(state: ChatState) -> ChatState:
-    if state["current_question"] >= len(QUESTIONS):
-        return {"final_analysis": analyze_responses(state["responses"]), "current_question": END}
-    
-    question = QUESTIONS[state["current_question"]]
-    st.session_state['current_question_text'] = question
-    return state
-
-def process_response(state: ChatState, user_input: str) -> ChatState:
-    q_idx = state["current_question"]
-    state["responses"][f"Q{q_idx + 1}"] = user_input
-    
-    if q_idx == 2:
-        market_info = tavily_search(f"market size and competitors for {user_input}")
-        state["responses"]["Q3_enriched"] = market_info
-    elif q_idx == 3:
-        competitors = search_web(f"alternatives to {user_input}")
-        state["responses"]["Q4_enriched"] = competitors
-    
-    state["current_question"] += 1
-    return state
 
 def analyze_responses(responses: Dict[str, str]) -> str:
     scores = {
@@ -80,34 +68,90 @@ def analyze_responses(responses: Dict[str, str]) -> str:
         "Scalability & Sustainability": 0.1 * (len(responses.get("Q9", "")) > 20 and len(responses.get("Q10", "")) > 20)
     }
     total_score = sum(scores.values()) * 100
-    return f"Analysis:\n{scores}\n\nTotal Score: {total_score:.2f}%"
+    return f"📊 Analysis Summary:\n{scores}\n\n💯 Total Score: {total_score:.2f}%"
 
-# === Streamlit App ===
+# === Core Logic ===
 
-st.set_page_config(page_title="Startup Pitch Evaluator", layout="centered")
-st.title("🚀 Startup Evaluation Assistant")
+def evaluate(user_input, state: ChatState):
+    if state is None:
+        state = {"responses": {}, "current_question": 0, "final_analysis": None}
 
-if "chat_state" not in st.session_state:
-    st.session_state.chat_state = {
-        "responses": {},
-        "current_question": 0,
-        "final_analysis": None
-    }
+    q_idx = state["current_question"]
 
-if "current_question_text" not in st.session_state:
-    st.session_state.current_question_text = QUESTIONS[0]
+    if q_idx < len(QUESTIONS):
+        state["responses"][f"Q{q_idx + 1}"] = user_input
 
-# Display current question
-if st.session_state.chat_state["current_question"] != END:
-    st.subheader(f"Question {st.session_state.chat_state['current_question'] + 1}")
-    st.write(st.session_state.current_question_text)
-    user_input = st.text_area("Your Answer:", key="user_input", height=100)
-    if st.button("Submit Answer"):
-        st.session_state.chat_state = process_response(st.session_state.chat_state, user_input)
-        st.session_state.chat_state = ask_question(st.session_state.chat_state)
-        st.session_state.user_input = ""
-        st.experimental_rerun()
-else:
-    st.success("✅ All questions answered.")
-    st.write("🧠 Generating Final Analysis...")
-    st.markdown(f"### {st.session_state.chat_state['final_analysis'] or analyze_responses(st.session_state.chat_state['responses'])}")
+        if q_idx == 2:
+            market_info = tavily_search(f"market size and competitors for {user_input}")
+            state["responses"]["Q3_enriched"] = market_info
+        elif q_idx == 3:
+            competitors = search_web(f"alternatives to {user_input}")
+            state["responses"]["Q4_enriched"] = competitors
+
+        state["current_question"] += 1
+
+    if state["current_question"] >= len(QUESTIONS):
+        analysis = analyze_responses(state["responses"])
+        state["final_analysis"] = analysis
+        return analysis, "", False, True, state
+    else:
+        next_q = QUESTIONS[state["current_question"]]
+        return next_q, "", True, False, state
+
+# === Gradio UI ===
+
+with gr.Blocks(css="textarea { font-size: 16px; }") as demo:
+    gr.Markdown("## 🚀 Startup Evaluation Assistant")
+    gr.Markdown("Answer the questions below to get an analysis of your startup idea. Be as specific and detailed as possible.")
+
+    state = gr.State()
+
+    with gr.Column():
+        question_display = gr.Textbox(label="Question", value=QUESTIONS[0], interactive=False, lines=2)
+        chatbot = gr.Textbox(label="Your Answer", lines=6, placeholder="Type your response here...", show_copy_button=True)
+        
+        with gr.Row():
+            submit = gr.Button("Submit")
+            restart_btn = gr.Button("🔄 Restart", variant="secondary")
+
+        final_output = gr.Textbox(label="Final Analysis", visible=False, lines=12, interactive=False, show_copy_button=True)
+
+    def restart():
+        return QUESTIONS[0], "", gr.update(visible=True), gr.update(visible=False), {"responses": {}, "current_question": 0, "final_analysis": None}
+
+    submit.click(
+        evaluate,
+        inputs=[chatbot, state],
+        outputs=[question_display, chatbot, chatbot, final_output, state]
+    )
+
+    restart_btn.click(
+        restart,
+        outputs=[question_display, chatbot, chatbot, final_output, state]
+    )
+
+# === FastAPI Integration ===
+
+app = FastAPI()
+gr_app = demo.server_app()
+app.mount("/gradio", gr_app)
+
+# API Input/Output Model
+class AnswerRequest(BaseModel):
+    answer: str
+    state: Optional[ChatState] = None
+
+@app.post("/answer")
+async def get_next_question(data: AnswerRequest):
+    q, _, input_visible, final_visible, new_state = evaluate(data.answer, data.state or {"responses": {}, "current_question": 0, "final_analysis": None})
+    return JSONResponse(content={
+        "next_question": q,
+        "show_input": input_visible,
+        "show_analysis": final_visible,
+        "state": new_state
+    })
+
+# === Run app ===
+
+if __name__ == "__main__":
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
