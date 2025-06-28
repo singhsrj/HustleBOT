@@ -1,5 +1,7 @@
 hackiitv
 stablediffusion2.1
+\.bolt
+\node_modules
 Definitivea
 .env
 .chainlit
