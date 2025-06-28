@@ -3,7 +3,10 @@ from typing import Dict, TypedDict, Optional
 from ollama import Client
 from serpapi import GoogleSearch
 from tavily import TavilyClient
-
+from dotenv import load_dotenv
+load_dotenv()
+import os
+tavily_search = os.environ('tavily_search')
 # === Replace langgraph logic manually (not installed on PyPI) ===
 
 class ChatState(TypedDict):
@@ -13,7 +16,7 @@ class ChatState(TypedDict):
 
 # === Init clients ===
 
-tavily_client_api= "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"
+
 serp_client_api = "843c455cc99584a69ecb59a5fdb67c5e7845f4c89a484b2e192b5966a8f73e00"
 
 ollama_client = Client(host='http://localhost:11434')
