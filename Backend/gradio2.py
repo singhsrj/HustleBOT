@@ -6,7 +6,7 @@ from tavily import TavilyClient
 from dotenv import load_dotenv
 load_dotenv()
 import os
-tavily_search = os.environ('tavily_search')
+tavily_client_api = os.environ('tavily_search')
 # === Replace langgraph logic manually (not installed on PyPI) ===
 
 class ChatState(TypedDict):
